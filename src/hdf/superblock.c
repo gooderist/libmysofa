@@ -16,43 +16,28 @@
    00000020  00 00 00 00 30 00 00 00  00 00 00 00 27 33 a3 16  |....0.......'3..|
 */
 
-int superblockRead(struct READER *reader, struct SUPERBLOCK *superblock) {
-	char buf[8];
-	memset(superblock, 0, sizeof(*superblock));
-
-	/* signature */
-	if (fread(buf, 1, 8, reader->fhd) != 8
-	    || strncmp("\211HDF\r\n\032\n", buf, 8)) {
-		log("file does not have correct signature");
-		return MYSOFA_INVALID_FORMAT;
-	}
-
-	/* read version of superblock, must be 2 */
-	if ((fgetc(reader->fhd) & ~1) != 2) {
-		log("superblock must have version 2 or 3\n");
-		return MYSOFA_UNSUPPORTED_FORMAT;
-	}
-
+int parseSuperblock0(struct READER *reader, struct SUPERBLOCK *superblock) {
+	fseek(reader->fhd, 4, SEEK_CUR);
 	superblock->size_of_offsets = (uint8_t)fgetc(reader->fhd);
 	superblock->size_of_lengths = (uint8_t)fgetc(reader->fhd);
-	if(fgetc(reader->fhd)<0) /* File Consistency Flags */
-		return MYSOFA_READ_ERROR;
+	fseek(reader->fhd, 9, SEEK_CUR);
 
 	if (superblock->size_of_offsets < 2 || superblock->size_of_offsets > 8
-	    || superblock->size_of_lengths < 2
-	    || superblock->size_of_lengths > 8) {
+		|| superblock->size_of_lengths < 2
+		|| superblock->size_of_lengths > 8) {
 		log("size of offsets and length is invalid: %d %d\n",
-		    superblock->size_of_offsets, superblock->size_of_lengths);
+			superblock->size_of_offsets, superblock->size_of_lengths);
 		return MYSOFA_UNSUPPORTED_FORMAT;
 	}
 
 	superblock->base_address = readValue(reader, superblock->size_of_offsets);
-	superblock->superblock_extension_address = readValue(reader,
-							     superblock->size_of_offsets);
+	superblock->superblock_extension_address = 0;
+	fseek(reader->fhd, superblock->size_of_offsets, SEEK_CUR);
 	superblock->end_of_file_address = readValue(reader,
-						    superblock->size_of_offsets);
-	superblock->root_group_object_header_address = readValue(reader,
-								 superblock->size_of_offsets);
+		superblock->size_of_offsets);
+	fseek(reader->fhd, superblock->size_of_offsets, SEEK_CUR);
+	superblock->root_group_object_header_address = 
+		ftell(reader->fhd) + superblock->size_of_offsets * 2 + 24;
 
 	if (superblock->base_address != 0) {
 		log("base address is not null\n");
@@ -65,8 +50,78 @@ int superblockRead(struct READER *reader, struct SUPERBLOCK *superblock) {
 	if (superblock->end_of_file_address != ftell(reader->fhd)) {
 		log("file size mismatch\n");
 		return MYSOFA_INVALID_FORMAT;
-
 	}
+
+	return MYSOFA_OK;
+}
+
+int parseSuperblock2(struct READER *reader, struct SUPERBLOCK *superblock) {
+	superblock->size_of_offsets = (uint8_t)fgetc(reader->fhd);
+	superblock->size_of_lengths = (uint8_t)fgetc(reader->fhd);
+	if (fgetc(reader->fhd) < 0) /* File Consistency Flags */
+		return MYSOFA_READ_ERROR;
+
+	if (superblock->size_of_offsets < 2 || superblock->size_of_offsets > 8
+		|| superblock->size_of_lengths < 2
+		|| superblock->size_of_lengths > 8) {
+		log("size of offsets and length is invalid: %d %d\n",
+			superblock->size_of_offsets, superblock->size_of_lengths);
+		return MYSOFA_UNSUPPORTED_FORMAT;
+	}
+
+	superblock->base_address = readValue(reader, superblock->size_of_offsets);
+	superblock->superblock_extension_address = readValue(reader,
+		superblock->size_of_offsets);
+	superblock->end_of_file_address = readValue(reader,
+		superblock->size_of_offsets);
+	superblock->root_group_object_header_address = readValue(reader,
+		superblock->size_of_offsets);
+
+	if (superblock->base_address != 0) {
+		log("base address is not null\n");
+		return MYSOFA_UNSUPPORTED_FORMAT;
+	}
+
+	if (fseek(reader->fhd, 0L, SEEK_END))
+		return errno;
+
+	if (superblock->end_of_file_address != ftell(reader->fhd)) {
+		log("file size mismatch\n");
+		return MYSOFA_INVALID_FORMAT;
+	}
+
+	return MYSOFA_OK;
+}
+
+int superblockRead(struct READER *reader, struct SUPERBLOCK *superblock) {
+	char buf[8];
+	int err = 0;
+	int sb_ver = 0;
+
+	memset(superblock, 0, sizeof(*superblock));
+
+	/* signature */
+	if (fread(buf, 1, 8, reader->fhd) != 8
+		|| strncmp("\211HDF\r\n\032\n", buf, 8)) {
+		log("file does not have correct signature");
+		return MYSOFA_INVALID_FORMAT;
+	}
+
+	/* read version of superblock */
+	sb_ver = fgetc(reader->fhd);
+	if (sb_ver == 2 || sb_ver == 3) {
+		log("superblock 2 or 3\n");
+		err = parseSuperblock2(reader, superblock);
+	} else if (sb_ver == 0) {
+		log("superblock 0\n");
+		err = parseSuperblock0(reader, superblock);
+	} else {
+		log("Unsupported superblock version %d\n", sb_ver);
+		return MYSOFA_INVALID_FORMAT;
+	}
+
+	if(err != MYSOFA_OK)
+		return err;
 
 	/* fseeko(fhd, 4, SEEK_CUR);  skip checksum */
 	/* end of superblock */
